@@ -5,15 +5,17 @@
 (require "state.rkt")
 (provide get-authorization-web-flow)
 
+;; OAuth-Obj [#:scope (Listof ???)] -> ???
+;; TODO: Identify unknown types.
 (define (get-authorization-web-flow oauth-obj #:scope (scope empty))
-  
+  ;; Direct the browser to request a token from the provider:
   (define req (send/suspend
                (lambda (a-url)
                  (redirect-to
                   (request-authorization-code oauth-obj
                                               #:state (encode-state a-url)
                                               #:scope scope)))))
-  
+  ;; TODO: modify request-auth-code to take bytes for #:state.
   (define-values (code _ auth-error) (get-grant-resp req))
   
   (cond    

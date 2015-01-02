@@ -5,6 +5,8 @@
 (require "state.rkt")
 (provide get-authorization-web-flow)
 
+;; OAuth-Obj [#:scope (Listof ???)] -> ???
+;; TODO: Identify unknown types.
 (define (get-authorization-web-flow oauth-obj #:scope (scope empty))
   
   (define req (send/suspend
@@ -13,21 +15,20 @@
                   (request-authorization-code oauth-obj
                                               #:state (encode-state a-url)
                                               #:scope scope)))))
-  
+  ;; TODO: modify request-auth-code to take bytes for #:state.
   (define-values (code _ auth-error) (get-grant-resp req))
   
   (cond    
-    [auth-error (raise 
-                 (exn:fail:authorization 
-                  (format "authorization-resp-error: ~a" auth-error)
-                  (current-continuation-marks)
-                  'authorization-response))]
-    
+    [auth-error
+     (raise (exn:fail:authorization
+             (format "authorization-resp-error: ~a" auth-error)
+             (current-continuation-marks)
+             'authorization-response))]
     [code (request-access-token oauth-obj #:code code)]
-    [else (exn:fail:authorization 
-           "authorization-resp-error: No code , No error"
-           (current-continuation-marks)
-           'authorization-response)]))
+    [else
+     (raise (exn:fail:authorization "authorization-resp-error: No code , No error"
+                                    (current-continuation-marks)
+                                    'authorization-response))]))
 
   
   
