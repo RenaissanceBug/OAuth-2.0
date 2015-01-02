@@ -1,0 +1,8 @@
+*~
+#*
+*.bak
+compiled/
+*.zo
+*.css
+*.html
+*.js
