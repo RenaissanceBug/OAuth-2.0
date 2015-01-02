@@ -1,37 +1,28 @@
 #lang racket
 (require net/url net/uri-codec)
-(require (planet dherman/json:3:0))
+(require json)
 (require "oauth-object.rkt")
-(require "utils/web-helper.rkt")
+(require web-server/http/request-structs)
 
 ;;Very basic mechanism for OAuth 2.0 protocol.
 
-(define encode form-urlencoded-encode)
+(struct exn:fail:authorization exn:fail (type))            
 
-(struct exn:fail:authorization exn:fail (type))
-
-
-;;todo move this somewhere else
-(define (insert-between lst v)
-  (cond
-    [(empty? lst) lst]
-    [(empty? (rest lst)) lst]
-    [else (cons (first lst)
-                (cons v (insert-between (rest lst) v)))]))            
+; Q: Why both make-auth-request and request-auth-code?
 
 ;;make-authorization-request : oauth-object string (listof string) -> string
 (define (make-authorization-request oauth-obj
                                     #:state state
                                     #:scope scope)
-  (define url (string->url (get-authorization-uri oauth-obj)))  
-  (define response-type (get-response-type oauth-obj))
-  (define new-scope (if (empty? scope) #f (apply string-append (insert-between scope " "))))
+  (define url (string->url (oauth-auth-uri oauth-obj)))  
+  (define response-type (oauth-response-type oauth-obj))
+  (define new-scope
+    (if (empty? scope) #f (apply string-append (string-join scope " "))))
   (define (make-query)
-    (list (cons 'client_id (get-client-id oauth-obj))                            
-          (cons 'redirect_uri (get-redirect-uri oauth-obj))
+    (list (cons 'client_id (oauth-client-id oauth-obj))                            
+          (cons 'redirect_uri (oauth-redirect-uri oauth-obj))
           (cons 'response_type response-type)
           (cons 'scope new-scope)
-                ;(apply string-append (insert-between scope " ")))
           (cons 'state state)))
     
   (if response-type
@@ -43,7 +34,8 @@
 
       
 
-;;request-authorization-code : oauth-object string (listof string) (string -> any) -> any
+;;request-authorization-code :
+;;  oauth-object string (listof string) (string -> any) -> any
 (define (request-authorization-code oauth-obj
                                     #:state (state #f)
                                     #:scope (scope empty)
@@ -56,45 +48,36 @@
   (req-method str-url))
 
   
-  
+;; TODO: Remove dependency on bindings
 ;;get-grant-resp: request -> (values string/false string/false string/false) 
 ;;May be second step.Returns three values :
 ;;1. code  : resource owner have granted access
 ;;2. state : the thing we initially passed to authorization server
 ;;3. error : resource owner failed to grant access , or some other error.
 (define (get-grant-resp request)
-  (define (get-code bindings)
-    (if (binding-exists? 'code bindings)
-        (get-value 'code bindings)
-        #f))
-    
-  (define (get-state bindings)
-    (if (binding-exists? 'state bindings)
-        (get-value 'state bindings)
-        #f))
-      
-  (define (get-error bindings)
-    (if (binding-exists? 'error bindings)
-        (get-value 'error bindings)
-        #f))
-  
-  (let ([bindings (get-bindings request)])
-    (values (get-code bindings)
-            (get-state bindings)
-            (get-error bindings))))
+  (define bindings (request-bindings/raw request))
+  (define (maybe-get key)
+    (match (bindings-assq key bindings)
+      [(? binding:form? b)
+       (bytes->string/utf-8 (binding:form-value b))]
+      [_ #f]))
+  (values (maybe-get #"code") (maybe-get #"state") (maybe-get #"error")))
 
   
 ;;make-post-string : (listof (pairof symbol (or string #f))) -> string
+;; TODO: this fn is building a URL query string. There's got to be a library fn
+;; to do that. Find it.
 (define (make-post-string loq)
   (define filtered-loq (filter (lambda (query) (cdr query)) loq))
-  (define to-string (map (lambda (query) (string-append
-                                          (symbol->string (car query))
-                                          "="
-                                          (encode (cdr query))))
-                         filtered-loq))
-  (apply string-append (insert-between to-string "&")))
+  (string-join (map (lambda (query) (string-append
+                                     (symbol->string (car query))
+                                     "="
+                                     (form-urlencoded-encode (cdr query))))
+                    filtered-loq)
+               "&"))
 
-;;grant-type : symbol -> string
+;;grant-type->string : symbol -> string
+;; XXX: This is only used in make-common-query-list. How can we eliminate it?
 (define (grant-type->string gt)
   (case gt
     [(authorization-code) "authorization_code"]
@@ -106,13 +89,13 @@
 ;;make-common-query : oauth-object boolean -> (listof (pairof symbol string))
 (define (make-common-query-list oauth-obj with-redirect?)
   (define common
-    (list (cons 'client_id (get-client-id oauth-obj))
-          (cons 'client_secret (get-client-secret oauth-obj))
-          (cons 'grant_type (grant-type->string (get-grant-type oauth-obj)))))
+    (list (cons 'client_id (oauth-client-id oauth-obj))
+          (cons 'client_secret (oauth-client-secret oauth-obj))
+          (cons 'grant_type (grant-type->string (oauth-grant-type oauth-obj)))))
   
     (if with-redirect?        
         (append common
-                (list (cons 'redirect_uri (get-redirect-uri oauth-obj))))
+                (list (cons 'redirect_uri (oauth-redirect-uri oauth-obj))))
         common))
          
    
@@ -148,7 +131,7 @@
 
 ;;make-access-request : oauth-object (or string #f) (or string #f) (or string #f) (or string #f) (or string #f) -> string
 (define (make-access-request oauth-obj code username password refresh-token scope)
-  (define grant-type (get-grant-type oauth-obj))
+  (define grant-type (oauth-grant-type oauth-obj))
   (define post-string
     (case grant-type
       [(authorization-code) (make-post-type-auth-code oauth-obj code)]
@@ -173,14 +156,15 @@
                             (make-oauth-with-grant-type oauth-obj 'refresh-token)
                             oauth-obj))
   
-  (define new-scope (if (empty? scope) #f (apply string-append (insert-between scope " "))))
+  (define new-scope
+    (if (empty? scope) #f (apply string-append (string-join scope " "))))
   (define post-string (make-access-request new-oauth-obj code username password refresh-token new-scope))  
   (request-token new-oauth-obj post-string))
 
 ;;request-token: oauth-object string -> hash
 (define (request-token oauth-obj post-string)
   (define extra-headers (list "Content-Type: application/x-www-form-urlencoded"))
-  (define token-uri (get-token-uri oauth-obj))
+  (define token-uri (oauth-token-uri oauth-obj))
   (call/input-url (string->url token-uri)
                   (lambda (url)
                     (post-impure-port url
@@ -188,8 +172,8 @@
                                       extra-headers))
                   (lambda (in)
                     (make-json-object (purify-port in) in))))
-                    
-  
+
+
 
 (define (make-json-object headers in)
   
@@ -218,11 +202,11 @@
     [(regexp-match? #rx"Content-Type.*json" str) 'json]
     [(regexp-match? #rx"text/plain" str) 'text-plain]
     [else #f]))
-  
 
-  
 
-(provide make-oauth-2 oauth-object?
+
+
+(provide make-oauth-2 oauth?
          request-authorization-code
          get-grant-resp 
          request-access-token

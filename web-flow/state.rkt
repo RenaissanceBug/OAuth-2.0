@@ -1,29 +1,28 @@
 #lang racket
-(require (planet vyzo/crypto:2:3))
+;(require (planet vyzo/crypto:2:3))
 (require net/url net/uri-codec net/base64)
+(require web-server/stuffers web-server/stuffers/hmac-sha1)
 
-(define key (random-bytes (digest-size digest:sha1)))
+(define HMAC-SHA1-blocksize 64) ;; bytes, per the HMAC-SHA1 standard spec
 
+(define key (apply bytes (for/list ([i 20]) (random 256))))
+
+(define stuff (stuffer-chain (HMAC-SHA1-stuffer key) base64-stuffer))
+
+;; Bytes -> Bytes
 (define (encode-state uri)
-  (define uri-bytes (string->bytes/utf-8 uri))
-  (define digest (hmac digest:sha1 key uri-bytes))
-  (define a-state (base64-encode (bytes-append digest uri-bytes)))
-  (bytes->string/utf-8 a-state))
+  (define ubytes (string->bytes/utf-8 uri))
+  ((stuffer-in stuff) ubytes))
 
-
+;; Bytes -> Bytes
 (define (decode-state state)
-  (define state-bytes (string->bytes/utf-8 state))
-  (define state-decode (base64-decode state-bytes))
-  
-  (if (<= (bytes-length state-decode) 20)
-      #f
-      (let ([digest (subbytes state-decode 0 20)]
-            [uri-bytes (subbytes state-decode 20)])
-        (if (equal? digest (hmac digest:sha1 key uri-bytes))
-            (bytes->string/utf-8 uri-bytes)
-            #f))))
+  ((stuffer-out stuff) state))
+;; errors if signature doesn't match or state is invalid
 
-(begin
-  (printf "state.rkt\n"))
 
 (provide decode-state encode-state)
+
+(module+ test
+  (require rackunit)
+  (check-equal? (decode-state (encode-state "http://foo.com/xyz"))
+                "http://foo.com/xyz"))
